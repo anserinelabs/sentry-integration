@@ -7,8 +7,7 @@ const PORT = 3333;
 const SENTRY_CLIENT_SECRET = process.env.SENTRY_CLIENT_SECRET;
 const SLASHWORK_AUTH_TOKEN = process.env.SLASHWORK_AUTH_TOKEN;
 const SLASHWORK_GROUP_ID = process.env.SLASHWORK_GROUP_ID;
-const SLASHWORK_GRAPHQL_URL =
-  'http://anserine.dev.anserinelabs.com:5173/api/graphql';
+const SLASHWORK_GRAPHQL_URL = 'https://anserine.slashwork.com/api/graphql';
 
 if (!SENTRY_CLIENT_SECRET || !SLASHWORK_AUTH_TOKEN || !SLASHWORK_GROUP_ID) {
   throw new Error('Missing required environment variables');
