@@ -2,7 +2,6 @@ import crypto from 'crypto';
 
 import express from 'express';
 
-const app = express();
 const PORT = 3333;
 
 const SENTRY_CLIENT_SECRET = process.env.SENTRY_CLIENT_SECRET;
@@ -15,43 +14,19 @@ if (!SENTRY_CLIENT_SECRET || !SLASHWORK_AUTH_TOKEN || !SLASHWORK_GROUP_ID) {
   throw new Error('Missing required environment variables');
 }
 
-interface RequestWithRawBody extends express.Request {
-  rawBody?: string;
-}
-
-// Middleware to capture raw body for signature verification
-app.use(
-  express.json({
-    verify: (req, _res, buf) => {
-      (req as RequestWithRawBody).rawBody = buf.toString('utf8');
-    },
-  }),
-);
-
-interface SentryWebhookPayload {
+type SentryWebhookPayload = {
   action: string;
   data: {
-    issue?: {
+    triggered_rule: string;
+    event: {
       title: string;
+      message?: string;
       web_url: string;
-      project: string;
     };
   };
-  project_slug?: string;
-}
+};
 
-function verifySentrySignature(
-  signature: string,
-  body: string,
-  secret: string,
-): boolean {
-  const hmac = crypto.createHmac('sha256', secret);
-  hmac.update(body, 'utf8');
-  const digest = hmac.digest('hex');
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
-}
-
-interface GraphQLResponse {
+type GraphQLResponse = {
   data?: {
     createPost: {
       node: {
@@ -59,8 +34,28 @@ interface GraphQLResponse {
       };
     };
   };
-  errors?: Array<{ message: string }>;
-}
+  errors?: { message: string }[];
+};
+
+const verifySentrySignatureMiddleware = express.json({
+  verify: (req, _res, buf) => {
+    const signature = req.headers['sentry-hook-signature'];
+
+    if (!signature || typeof signature !== 'string') {
+      console.error('Missing Sentry signature');
+      throw new Error('Missing signature');
+    }
+
+    const hmac = crypto.createHmac('sha256', SENTRY_CLIENT_SECRET);
+    hmac.update(buf);
+    const digest = hmac.digest('hex');
+
+    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest))) {
+      console.error('Invalid Sentry signature');
+      throw new Error('Invalid signature');
+    }
+  },
+});
 
 async function postToSlashwork(markdown: string): Promise<void> {
   const mutation = `
@@ -114,54 +109,33 @@ async function postToSlashwork(markdown: string): Promise<void> {
   );
 }
 
-app.post('/webhook/sentry', (req, res) => {
-  const signature = req.headers['sentry-hook-signature'] as string | undefined;
-  const rawBody = (req as RequestWithRawBody).rawBody;
-
-  if (!signature) {
-    console.error('Missing Sentry signature');
-    res.status(401).json({ error: 'Missing signature' });
-    return;
-  }
-
-  if (!rawBody) {
-    console.error('Missing request body');
-    res.status(400).json({ error: 'Missing body' });
-    return;
-  }
-
-  if (!verifySentrySignature(signature, rawBody, SENTRY_CLIENT_SECRET)) {
-    console.error('Invalid Sentry signature');
-    res.status(401).json({ error: 'Invalid signature' });
-    return;
-  }
-
-  const payload = req.body as SentryWebhookPayload;
-
-  // Respond to Sentry immediately (they have a 1 second timeout)
-  res.status(200).json({ success: true });
-
-  // Process the webhook asynchronously
-  void (async () => {
-    try {
-      const issue = payload.data?.issue;
-      if (!issue) {
-        console.log('No issue data in webhook, skipping');
-        return;
-      }
-
-      const markdown = `**Sentry Alert**
-
-**Project:** ${issue.project || payload.project_slug || 'Unknown'}
-**Error:** ${issue.title}
-
-[View in Sentry](${issue.web_url})`;
-
-      await postToSlashwork(markdown);
-    } catch (error) {
-      console.error('Error processing Sentry webhook:', error);
+async function processPayload(payload: SentryWebhookPayload) {
+  try {
+    if (payload.action !== 'triggered') {
+      console.log('Wrong action type, skipping');
+      return;
     }
-  })();
+
+    const markdown = `# ${payload.data.event.title}
+
+**Message:** ${payload.data.event.message}
+**Rule:** ${payload.data.triggered_rule}
+
+[Go to Sentry](${payload.data.event.web_url})`;
+
+    await postToSlashwork(markdown);
+  } catch (error) {
+    console.error('Error processing Sentry webhook:', error);
+  }
+}
+
+const app = express();
+
+app.post('/webhook/sentry', verifySentrySignatureMiddleware, (req, res) => {
+  res.sendStatus(200);
+
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+  void processPayload(req.body);
 });
 
 app.listen(PORT, () => {
